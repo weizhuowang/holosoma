@@ -103,6 +103,8 @@ class ExperimentConfig:
     """Top-level experiment configuration used by the Tyro CLI."""
 
     env_class: str = "holosoma.envs.locomotion.locomotion_manager.LeggedRobotLocomotionManager"
+    device: str | int | None = None
+    """Execution device override (e.g., ``cuda:1``, ``cpu``, or integer GPU index)."""
 
     training: TrainingConfig = TrainingConfig()
     algo: Annotated[

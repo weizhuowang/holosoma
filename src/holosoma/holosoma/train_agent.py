@@ -94,16 +94,27 @@ def configure_multi_gpu() -> MultGPUConfig | None:
 def get_device(config, distributed_conf: MultGPUConfig | None) -> str:
     import torch
 
+    def _normalize_device(device_value) -> str:
+        if isinstance(device_value, int):
+            return f"cuda:{device_value}"
+        if isinstance(device_value, str):
+            dev = device_value.strip()
+            if dev.isdigit():
+                return f"cuda:{dev}"
+            return dev
+        raise ValueError(f"Unsupported device value: {device_value!r}")
+
     is_config_device_specified = hasattr(config, "device") and config.device is not None
     is_multi_gpu = distributed_conf is not None
 
     if is_config_device_specified:
-        if is_multi_gpu and config.device != cast("dict", distributed_conf)["local_rank"]:
+        normalized = _normalize_device(config.device)
+        if is_multi_gpu and normalized != f"cuda:{cast('dict', distributed_conf)['local_rank']}":
             raise ValueError(
-                f"Device specified in config ({config.device}) \
+                f"Device specified in config ({normalized}) \
                               does not match expected local rank {cast('dict', distributed_conf)['local_rank']}"
             )
-        device = config.device
+        device = normalized
     elif is_multi_gpu:
         device = f"cuda:{cast('dict', distributed_conf)['local_rank']}"
     else:

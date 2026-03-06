@@ -524,6 +524,14 @@ class SymmetryUtils:
         """
         return actions[..., self.joint_index_map] * self.sign_flip_mask
 
+    def mirror_obs_joint_temperature(self, joint_temperature: torch.Tensor) -> torch.Tensor:
+        """Mirrors per-DOF joint temperatures using joint index mapping only.
+
+        Temperatures are scalar magnitudes per joint, so left-right remapping is
+        needed but sign flipping is not.
+        """
+        return joint_temperature[..., self.joint_index_map]
+
     def mirror_obs_ee_apply_force(self, ee_apply_force: torch.Tensor) -> torch.Tensor:
         """Mirrors the end-effector applied forces in base frame.
 
