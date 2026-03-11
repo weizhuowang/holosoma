@@ -240,6 +240,8 @@ def train(tyro_config: ExperimentConfig, training_context: TrainingContext | Non
                 wandb_kwargs["tags"] = list(wandb_cfg.tags)
             if wandb_cfg.resume is not None:
                 wandb_kwargs["resume"] = wandb_cfg.resume
+            if wandb_cfg.notes:
+                wandb_kwargs["notes"] = wandb_cfg.notes
 
             wandb.init(**wandb_kwargs)
             if wandb.run is not None:
@@ -304,6 +306,10 @@ def train(tyro_config: ExperimentConfig, training_context: TrainingContext | Non
         # teardown wandb before SimApp closes ungracefully (IsaacLab)
         if is_main_process and wandb_enabled:
             logger.info("Shutting down wandb...")
+            if wandb.run is not None:
+                wandb.run.finish()
+            import time
+            time.sleep(2)  # let wandb background threads drain
             wandb.teardown()
 
         # shutdown dist before SimApp closes ungracefully (IsaacLab)

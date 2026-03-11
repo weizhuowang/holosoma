@@ -64,6 +64,9 @@ class WandbLoggerConfig:
     tags: tuple[str, ...] = ()
     """Optional tags to attach to the run."""
 
+    notes: str | None = None
+    """Optional notes for the run."""
+
     dir: str | None = None
     """Directory to store wandb metadata locally."""
 
