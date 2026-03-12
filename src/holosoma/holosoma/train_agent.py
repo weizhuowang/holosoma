@@ -316,6 +316,10 @@ def train(tyro_config: ExperimentConfig, training_context: TrainingContext | Non
         if is_distributed:
             logger.info("Shutting down distributed processes...")
             dist.destroy_process_group()
+
+        # Force exit to avoid Isaac Sim's slow shutdown hanging the job queue
+        logger.info("Training complete. Force exiting to avoid slow simulator shutdown.")
+        os._exit(0)
     except Exception as e:
         tb_str = traceback.format_exc()
         logger.error(f"Exception occurred during training: {e}\n{tb_str}")
