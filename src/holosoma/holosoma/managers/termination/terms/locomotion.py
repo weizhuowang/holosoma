@@ -79,3 +79,26 @@ def torque_limit_exceeded(env, probability: float = 1.0) -> torch.Tensor:
     ).clip(min=0.0, max=1.0)
     violation = torch.sum(delta, dim=1) > 0.0
     return _apply_probability(violation, probability, env.device)
+
+
+# ================================================================================================
+# Thermal Termination
+# ================================================================================================
+
+
+def temperature_exceeded(env, threshold: float = 90.0) -> torch.Tensor:
+    """Terminate if any joint winding temperature exceeds threshold.
+
+    Requires env to have ``winding_temps`` (set by ``LeggedRobotLocomotionThermalManager``).
+
+    Args:
+        env: The environment instance
+        threshold: Temperature limit in degrees Celsius
+
+    Returns:
+        Boolean tensor [num_envs]
+    """
+    winding_temps = getattr(env, "winding_temps", None)
+    if winding_temps is None:
+        return torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+    return (winding_temps > threshold).any(dim=1)

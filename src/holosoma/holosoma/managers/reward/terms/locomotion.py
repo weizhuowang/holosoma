@@ -390,3 +390,46 @@ def alive(env) -> torch.Tensor:
         Reward tensor [num_envs]
     """
     return torch.ones(env.num_envs, dtype=torch.float, device=env.device)
+
+
+# ================================================================================================
+# Thermal Rewards
+# ================================================================================================
+
+
+def penalty_joint_temperature(
+    env,
+    start_temp: float = 60.0,
+    ramp_temp: float = 50.0,
+    max_penalty: float = 1.5,
+    max_weight: float = 0.8,
+    mean_weight: float = 0.2,
+    overall_scale: float = 0.3,
+) -> torch.Tensor:
+    """Combined temperature penalty using max and mean components.
+
+    Per-joint penalty ramps linearly from 0 at ``start_temp`` to ``max_penalty``
+    at ``start_temp + ramp_temp * max_penalty``.  The final scalar combines the
+    hottest-joint component and the mean component.
+
+    Requires env to have ``winding_temps`` (set by ``LeggedRobotLocomotionThermalManager``).
+
+    Args:
+        env: The environment instance
+        start_temp: Temperature (C) at which penalty begins
+        ramp_temp: Temperature range (C) over which penalty ramps from 0 to 1
+        max_penalty: Maximum per-joint penalty value (clamp)
+        max_weight: Weight on the hottest-joint component
+        mean_weight: Weight on the mean component
+        overall_scale: Final multiplier on the combined penalty
+
+    Returns:
+        Reward tensor [num_envs]
+    """
+    winding_temps = getattr(env, "winding_temps", None)
+    if winding_temps is None:
+        return torch.zeros(env.num_envs, dtype=torch.float32, device=env.device)
+    per_joint_penalty = torch.clamp((winding_temps - start_temp) / ramp_temp, min=0.0, max=max_penalty)
+    max_component = per_joint_penalty.max(dim=1).values
+    mean_component = per_joint_penalty.mean(dim=1)
+    return (max_weight * max_component + mean_weight * mean_component) * overall_scale

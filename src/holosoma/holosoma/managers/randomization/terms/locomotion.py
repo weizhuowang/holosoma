@@ -1175,3 +1175,57 @@ def apply_pushes(
     state.resample(push_robot_env_ids)
     env._max_push_vel = state.max_push_vel.clone()
     env._push_robots(push_robot_env_ids)
+
+
+# ================================================================================================
+# Thermal Reset
+# ================================================================================================
+
+
+def thermal_reset(
+    env: Any,
+    env_ids: torch.Tensor | Sequence[int],
+    randomize_temp: bool = True,
+    winding_temp_range: Sequence[float] = (30.0, 50.0),
+    case_temp_range: Sequence[float] = (30.0, 50.0),
+    hot_knee_prob: float = 0.4,
+    hot_hip_prob: float = 0.4,
+    hot_joint_temp: float = 90.0,
+) -> None:
+    """Randomize thermal state on episode reset.
+
+    Delegates to ``env.apply_thermal_reset()`` which is provided by
+    ``LeggedRobotLocomotionThermalManager``.  If the environment does not
+    have a thermal simulator this is a no-op.
+
+    Parameters
+    ----------
+    env : Any
+        Environment instance.
+    env_ids : Tensor or Sequence[int]
+        Indices of environments being reset.
+    randomize_temp : bool
+        Whether to randomize initial temperatures (disabled during evaluation).
+    winding_temp_range : (float, float)
+        Uniform range for initial winding temperatures.
+    case_temp_range : (float, float)
+        Uniform range for initial case temperatures.
+    hot_knee_prob : float
+        Probability of hot-knee structured initialization.
+    hot_hip_prob : float
+        Probability of hot-hip structured initialization.
+    hot_joint_temp : float
+        Temperature assigned to hot joints in structured initialization.
+    """
+    apply_fn = getattr(env, "apply_thermal_reset", None)
+    if apply_fn is None:
+        return
+    apply_fn(
+        env_ids,
+        randomize_temp=randomize_temp and not env.is_evaluating,
+        winding_temp_range=winding_temp_range,
+        case_temp_range=case_temp_range,
+        hot_knee_prob=hot_knee_prob,
+        hot_hip_prob=hot_hip_prob,
+        hot_joint_temp=hot_joint_temp,
+    )

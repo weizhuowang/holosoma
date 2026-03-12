@@ -23,6 +23,18 @@ except Exception as exc:  # pragma: no cover - defensive fallback
 
 
 class LeggedRobotLocomotionThermalManager(LeggedRobotLocomotionManager):
+    """Locomotion environment with thermal motor simulation.
+
+    Responsibilities (kept thin):
+    - Initialize ``ThermalSimulator`` from ``toy_thermal_ig``
+    - Update thermal state each physics step
+    - Expose ``apply_thermal_reset()`` for the randomization manager
+    - Log thermal metrics
+
+    Observation, reward, and termination terms live in
+    ``managers/{observation,reward,termination}/terms/locomotion.py``.
+    """
+
     DEFAULT_THERMAL_PARAMS_PATH = (
         Path.home()
         / "Documents"
@@ -78,6 +90,10 @@ class LeggedRobotLocomotionThermalManager(LeggedRobotLocomotionManager):
         except Exception:
             self.torques = torch.zeros((self.num_envs, self.num_dof), device=self.device)
 
+    # ------------------------------------------------------------------
+    # Per-step thermal update
+    # ------------------------------------------------------------------
+
     def _pre_compute_observations_callback(self):
         self._update_thermal_simulation()
         super()._pre_compute_observations_callback()
@@ -100,17 +116,9 @@ class LeggedRobotLocomotionThermalManager(LeggedRobotLocomotionManager):
         self.case_temps = case_temps
         self.motor_torques_AB = self.thermal_simulator.compute_motor_torques(self.torques, self.simulator.dof_pos)
 
-    def _reset_tasks_callback(self, env_ids):
-        # Keep reset logic self-contained in thermal env instead of global randomization terms.
-        self.apply_thermal_reset(
-            env_ids,
-            randomize_temp=not self.is_evaluating,
-            winding_temp_range=(30.0, 50.0),
-            case_temp_range=(30.0, 50.0),
-            hot_knee_prob=0.4,
-            hot_hip_prob=0.4,
-            hot_joint_temp=90.0,
-        )
+    # ------------------------------------------------------------------
+    # Thermal reset (called by randomization term ``thermal_reset``)
+    # ------------------------------------------------------------------
 
     def apply_thermal_reset(
         self,
@@ -203,6 +211,10 @@ class LeggedRobotLocomotionThermalManager(LeggedRobotLocomotionManager):
         initial_winding_temps = torch.max(initial_winding_temps, initial_case_temps)
         return initial_winding_temps, initial_case_temps
 
+    # ------------------------------------------------------------------
+    # Logging & monitoring
+    # ------------------------------------------------------------------
+
     def get_thermal_info(self):
         return self.thermal_simulator.get_thermal_info()
 
@@ -222,38 +234,3 @@ class LeggedRobotLocomotionThermalManager(LeggedRobotLocomotionManager):
         self.log_dict["temp_penalty_sum7"] = sum_penalty.mean()
         self.log_dict["max_winding_temp"] = self.winding_temps.max(dim=1).values.mean()
         self.log_dict["mean_winding_temp"] = self.winding_temps.mean()
-
-
-def obs_joint_temperature(env, ambient_temp: float = 30.0, clip_max: float = 300.0) -> torch.Tensor:
-    output = torch.full((env.num_envs, env.num_dof), ambient_temp, device=env.device, dtype=torch.float32)
-    winding_temps = getattr(env, "winding_temps", None)
-    thermal_joint_indices = getattr(env, "thermal_joint_indices", None)
-    if winding_temps is None or thermal_joint_indices is None or len(thermal_joint_indices) == 0:
-        return output
-    output[:, thermal_joint_indices] = torch.clamp(winding_temps, max=clip_max)
-    return output
-
-
-def reward_penalty_joint_temperature(
-    env,
-    start_temp: float = 60.0,
-    ramp_temp: float = 50.0,
-    max_penalty: float = 1.5,
-    max_weight: float = 0.8,
-    mean_weight: float = 0.2,
-    overall_scale: float = 0.3,
-) -> torch.Tensor:
-    winding_temps = getattr(env, "winding_temps", None)
-    if winding_temps is None:
-        return torch.zeros(env.num_envs, dtype=torch.float32, device=env.device)
-    per_joint_penalty = torch.clamp((winding_temps - start_temp) / ramp_temp, min=0.0, max=max_penalty)
-    max_component = per_joint_penalty.max(dim=1).values
-    mean_component = per_joint_penalty.mean(dim=1)
-    return (max_weight * max_component + mean_weight * mean_component) * overall_scale
-
-
-def termination_temperature_exceeded(env, threshold: float = 90.0) -> torch.Tensor:
-    winding_temps = getattr(env, "winding_temps", None)
-    if winding_temps is None:
-        return torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
-    return (winding_temps > threshold).any(dim=1)
