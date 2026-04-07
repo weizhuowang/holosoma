@@ -68,7 +68,7 @@ class LeggedRobotLocomotionThermalManager(LeggedRobotLocomotionManager):
             device=self.device,
             ambient_temp=self.thermal_ambient_temp,
             enable_parallel_mechanisms=True,
-            fast_dynamics=False,
+            fast_dynamics=True,
         )
 
         self.thermal_joint_names = self.thermal_simulator.thermal_joint_names
@@ -89,6 +89,34 @@ class LeggedRobotLocomotionThermalManager(LeggedRobotLocomotionManager):
             self.torques = joint_term.torques
         except Exception:
             self.torques = torch.zeros((self.num_envs, self.num_dof), device=self.device)
+
+    # ------------------------------------------------------------------
+    # Fallback thermal reset on episode boundaries
+    # ------------------------------------------------------------------
+
+    def _reset_tasks_callback(self, env_ids):
+        """Reset thermal state to ambient for environments that are resetting.
+
+        This guarantees temperatures are reset even when the ``thermal_reset``
+        randomization term is not present in the config.  When the term *is*
+        present it will run afterwards (in ``randomization_manager.reset``)
+        and overwrite with its own randomized temperatures.
+        """
+        super()._reset_tasks_callback(env_ids)
+        if not hasattr(self, "thermal_simulator"):
+            return
+        if isinstance(env_ids, torch.Tensor):
+            env_ids_tensor = env_ids.to(device=self.device, dtype=torch.long)
+        else:
+            env_ids_tensor = torch.as_tensor(env_ids, device=self.device, dtype=torch.long)
+        if env_ids_tensor.numel() == 0:
+            return
+        self.thermal_simulator.reset(env_ids=env_ids_tensor)
+        self.winding_temps = self.thermal_simulator.winding_temps
+        self.case_temps = self.thermal_simulator.case_temps
+        self.torque_history = self.thermal_simulator.torque_history
+        self.prev_winding_temps[env_ids_tensor] = self.winding_temps[env_ids_tensor].clone()
+        self.initial_winding_temps[env_ids_tensor] = self.winding_temps[env_ids_tensor].clone()
 
     # ------------------------------------------------------------------
     # Per-step thermal update
