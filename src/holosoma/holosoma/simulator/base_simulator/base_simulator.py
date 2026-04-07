@@ -189,6 +189,18 @@ class BaseSimulator:
         """
         self.headless = headless
 
+    def should_setup_viewer(self) -> bool:
+        """Whether viewer setup should run for this simulator instance."""
+        return not self.headless
+
+    def close(self) -> None:
+        """Release simulator-owned resources.
+
+        Subclasses can override this when they own explicit resources such as
+        remote viewers, sockets, or native window handles.
+        """
+        return
+
     def set_startup_randomization_callback(self, callback):
         """Sets a callback to be invoked during environment startup for domain randomization.
 
@@ -432,7 +444,7 @@ class BaseSimulator:
         Raises
         ------
         ValueError
-            If viewer.enabled=True but viewer.camera is None
+            If viewer.enable_tracking=True but viewer.camera is None
         Exception
             If camera controller initialization fails
         """

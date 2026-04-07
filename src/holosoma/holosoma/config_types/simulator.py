@@ -491,7 +491,7 @@ class SimulatorInitConfig:
 
     Example:
         viewer=ViewerConfig(
-            enabled=True,
+            backend="native",
             camera=SphericalCameraConfig(
                 distance=3.0,
                 azimuth=45.0,

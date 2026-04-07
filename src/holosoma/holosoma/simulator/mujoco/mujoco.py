@@ -26,8 +26,9 @@ from holosoma.simulator.mujoco.tensor_views import (
     create_base_linear_acceleration_view,
 )
 from holosoma.simulator.mujoco.video_recorder import MuJoCoVideoRecorder
+from holosoma.simulator.mujoco.viser_viewer import MuJoCoViewerSnapshot, MuJoCoViserViewer
 from holosoma.simulator.shared.object_registry import ObjectType
-from holosoma.simulator.shared.virtual_gantry import create_virtual_gantry
+from holosoma.simulator.shared.virtual_gantry import GantryCommand, GantryCommandData, create_virtual_gantry
 from holosoma.simulator.types import ActorIndices, ActorNames, ActorPoses, ActorStates, EnvIds
 from holosoma.utils.adapters import mujoco_draw_adapter
 
@@ -141,6 +142,7 @@ class MuJoCo(BaseSimulator):
 
         # Viewer
         self.viewer: mujoco.viewer.Handle | None = None
+        self.remote_viewer: MuJoCoViserViewer | None = None
 
         # World ID for multi-environment visualization (which environment to view)
         self.current_world_id: int = 0
@@ -153,6 +155,7 @@ class MuJoCo(BaseSimulator):
         #    [vx, vy, vz, yaw_rate, walk_stand, waist_yaw, ..., height, ...]
         # Shape: [num_envs, 9] to match IsaacGym command structure
         self.commands: torch.Tensor | None = None  # Will be initialized in create_envs when num_envs is known
+        self._command_registry: CommandRegistry | None = None
 
         logger.info("=== MuJoCo Simulator Initialization Completed ===")
 
@@ -261,6 +264,13 @@ class MuJoCo(BaseSimulator):
         """
         super().set_headless(headless)
         self.headless = headless
+
+    def should_setup_viewer(self) -> bool:
+        """Whether any configured viewer backend should be initialized."""
+        viewer_cfg = self.simulator_config.viewer
+        if viewer_cfg.backend == "none":
+            return False
+        return viewer_cfg.uses_viser() or (viewer_cfg.uses_native() and not self.headless)
 
     def setup(self) -> None:
         """Initialize simulator parameters and environment."""
@@ -888,8 +898,142 @@ class MuJoCo(BaseSimulator):
         if self.virtual_gantry:
             self.virtual_gantry.draw_debug()
 
+    def _ensure_command_registry(self) -> CommandRegistry:
+        """Create the command registry on first use."""
+        if self._command_registry is None:
+            self._command_registry = CommandRegistry(self)
+            self._command_registry.on_command_executed = self._update_text_overlay
+        return self._command_registry
+
+    def _set_camera_tracking(self, enabled: bool | None = None) -> None:
+        """Enable, disable, or toggle camera tracking."""
+        current = self.simulator_config.viewer.enable_tracking
+        new_value = (not current) if enabled is None else bool(enabled)
+        if new_value == current:
+            return
+
+        self.simulator_config = dataclasses.replace(
+            self.simulator_config,
+            viewer=dataclasses.replace(self.simulator_config.viewer, enable_tracking=new_value),
+        )
+        status = "ON" if new_value else "OFF"
+        logger.info(f"Camera tracking: {status}")
+        self._update_text_overlay()
+
+    def execute_named_command(self, name: str, value: object | None = None) -> bool:
+        """Execute a named simulator command shared by native and browser viewers."""
+        if self.commands is None:
+            return False
+
+        handled = False
+        if name == "toggle_camera_tracking":
+            self._set_camera_tracking()
+            return True
+        elif name == "set_camera_tracking":
+            self._set_camera_tracking(bool(value))
+            return True
+        elif name == "gantry_raise" and self.virtual_gantry is not None:
+            handled = self.virtual_gantry.handle_command(GantryCommandData(GantryCommand.LENGTH_ADJUST, {"amount": -0.1}))
+        elif name == "gantry_lower" and self.virtual_gantry is not None:
+            handled = self.virtual_gantry.handle_command(GantryCommandData(GantryCommand.LENGTH_ADJUST, {"amount": 0.1}))
+        elif name == "gantry_toggle" and self.virtual_gantry is not None:
+            handled = self.virtual_gantry.handle_command(GantryCommandData(GantryCommand.TOGGLE))
+        elif name == "gantry_force_adjust" and self.virtual_gantry is not None:
+            amount = None if value is None else float(value)
+            params = {} if amount is None else {"amount": amount}
+            handled = self.virtual_gantry.handle_command(GantryCommandData(GantryCommand.FORCE_ADJUST, params))
+        elif name == "gantry_force_sign_toggle" and self.virtual_gantry is not None:
+            handled = self.virtual_gantry.handle_command(GantryCommandData(GantryCommand.FORCE_SIGN_TOGGLE))
+        elif name == "zero_commands":
+            self._ensure_command_registry()._zero_commands()
+            self._update_text_overlay()
+            return True
+        elif name == "reset":
+            self.reset()
+            return True
+        elif name == "prev_world" and self.num_envs > 1:
+            self.current_world_id = (self.current_world_id - 1) % self.num_envs
+            logger.info(f"Viewing environment: {self.current_world_id + 1}/{self.num_envs}")
+            return True
+        elif name == "next_world" and self.num_envs > 1:
+            self.current_world_id = (self.current_world_id + 1) % self.num_envs
+            logger.info(f"Viewing environment: {self.current_world_id + 1}/{self.num_envs}")
+            return True
+        elif name == "set_world_id" and value is not None and self.num_envs > 1:
+            requested_id = max(0, min(int(value), self.num_envs - 1))
+            self.current_world_id = requested_id
+            logger.info(f"Viewing environment: {self.current_world_id + 1}/{self.num_envs}")
+            return True
+
+        if handled:
+            self._update_text_overlay()
+        return handled
+
+    def reset(self) -> None:
+        """Reset the MuJoCo simulation to its configured initial state."""
+        assert self.root_model is not None
+        assert self.root_data is not None
+
+        logger.info("Resetting MuJoCo simulation")
+        mujoco.mj_resetData(self.root_model, self.root_data)
+        self._set_robot_initial_state()
+        self._set_initial_joint_angles()
+        mujoco.mj_forward(self.root_model, self.root_data)
+
+        if isinstance(self.backend, WarpBackend):
+            self.backend.initialize_state(self.root_model, self.root_data)
+
+        self.current_world_id = 0
+        self._zero_commands()
+        self.on_episode_start(env_id=0)
+        self._update_text_overlay()
+
+    def get_viewer_snapshot(self) -> MuJoCoViewerSnapshot:
+        """Build a structured snapshot for browser-based viewers."""
+        assert self.root_data is not None
+        assert self.robot_qpos_addr is not None
+
+        root_pos = np.asarray(self.root_data.qpos[self.robot_qpos_addr : self.robot_qpos_addr + 3], dtype=np.float64)
+        root_quat_wxyz = np.asarray(
+            self.root_data.qpos[self.robot_qpos_addr + 3 : self.robot_qpos_addr + 7],
+            dtype=np.float64,
+        )
+        joint_positions = np.asarray([self.root_data.qpos[idx] for idx in self.dof_qpos_addrs], dtype=np.float64)
+
+        commands = None
+        if self.commands is not None and self.commands.numel() > 0:
+            world_id = min(self.current_world_id, self.commands.shape[0] - 1)
+            commands = self.commands[world_id].detach().cpu().numpy().copy()
+
+        gantry_enabled = self.virtual_gantry.enabled if self.virtual_gantry is not None else False
+        gantry_length = self.virtual_gantry.length if self.virtual_gantry is not None else None
+        gantry_force = self.virtual_gantry.apply_force if self.virtual_gantry is not None else None
+        gantry_point = None
+        gantry_attachment_pos = None
+        if self.virtual_gantry is not None:
+            gantry_point = np.asarray(self.virtual_gantry.point, dtype=np.float64).copy()
+            gantry_attachment_pos = np.asarray(self.root_data.xpos[self.virtual_gantry.body_link_id], dtype=np.float64)
+
+        return MuJoCoViewerSnapshot(
+            sim_time=float(self.root_data.time),
+            root_pos=root_pos.copy(),
+            root_quat_wxyz=root_quat_wxyz.copy(),
+            joint_positions=joint_positions.copy(),
+            commands=commands,
+            gantry_enabled=gantry_enabled,
+            gantry_length=gantry_length,
+            gantry_force=gantry_force,
+            gantry_point=gantry_point,
+            gantry_attachment_pos=gantry_attachment_pos,
+            camera_tracking=self.simulator_config.viewer.enable_tracking,
+        )
+
     def simulate_at_each_physics_step(self) -> None:
         """Advance simulation by one step."""
+
+        if self.remote_viewer is not None:
+            for command in self.remote_viewer.drain_pending_commands():
+                self.execute_named_command(command.name, command.value)
 
         if self.virtual_gantry:
             # Apply virtual gantry forces before step
@@ -1304,16 +1448,38 @@ class MuJoCo(BaseSimulator):
         raise RuntimeError(f"Body '{body_name}' not found in body_names: {self.body_names}")
 
     def setup_viewer(self) -> None:
-        """Set up MuJoCo viewer using official mujoco.viewer API with keyboard callback."""
-        logger.info("=== Setting up MuJoCo viewer ===")
+        """Set up any configured viewer backends."""
+        logger.info("=== Setting up MuJoCo viewer backend(s) ===")
 
-        if self.headless:
-            logger.info("Headless mode enabled - skipping viewer setup")
+        viewer_cfg = self.simulator_config.viewer
+        if viewer_cfg.backend == "none":
+            logger.info("Viewer backend set to 'none' - skipping viewer setup")
             self.viewer = None
+            self.remote_viewer = None
             return
 
-        self.viewer = mujoco.viewer.launch_passive(self.root_model, self.root_data, key_callback=self._key_callback)
-        logger.info("=== Viewer setup completed with keyboard callback ===")
+        if viewer_cfg.uses_native():
+            if self.headless:
+                logger.info("Headless mode enabled - skipping native MuJoCo viewer")
+                self.viewer = None
+            else:
+                self.viewer = mujoco.viewer.launch_passive(
+                    self.root_model,
+                    self.root_data,
+                    key_callback=self._key_callback,
+                )
+                self._update_text_overlay()
+                logger.info("Native MuJoCo viewer ready")
+        else:
+            self.viewer = None
+
+        if viewer_cfg.uses_viser():
+            self.remote_viewer = MuJoCoViserViewer(self)
+            self.remote_viewer.start()
+        else:
+            self.remote_viewer = None
+
+        logger.info("=== MuJoCo viewer setup completed ===")
 
     def _add_text_overlay(
         self,
@@ -1355,22 +1521,26 @@ class MuJoCo(BaseSimulator):
         sync_frame_time : bool
             Whether to synchronize frame time (currently unused).
         """
-        if self.viewer is None:
-            logger.warning("Cannot render, no viewer")
+        has_native_viewer = self.viewer is not None
+        has_remote_viewer = self.remote_viewer is not None
+        if not has_native_viewer and not has_remote_viewer:
             return
 
         # Sync GPU -> CPU for WarpBackend with current world_id
         # (no-op for ClassicBackend which returns same data)
         self.root_data = self.backend.get_render_data(world_id=self.current_world_id)
 
-        if self.simulator_config.viewer.enable_tracking:
+        if has_native_viewer and self.simulator_config.viewer.enable_tracking:
             robot_body_id = 1
             self.viewer.cam.lookat[:] = self.root_data.xpos[robot_body_id]
 
-        self.viewer.sync()
-        if self.debug_viz_enabled:
+        if has_native_viewer:
+            self.viewer.sync()
+        if has_native_viewer and self.debug_viz_enabled:
             self.clear_lines()
             self.draw_debug_viz()
+        if has_remote_viewer:
+            self.remote_viewer.update(self.get_viewer_snapshot())
 
     def time(self) -> float:
         """Get current simulation time in seconds.
@@ -1476,15 +1646,7 @@ class MuJoCo(BaseSimulator):
 
         # Y key (89): Toggle camera tracking
         if keycode == 89:  # 'Y' key
-            self.simulator_config = dataclasses.replace(
-                self.simulator_config,
-                viewer=dataclasses.replace(
-                    self.simulator_config.viewer, enable_tracking=not self.simulator_config.viewer.enable_tracking
-                ),
-            )
-            status = "ON" if self.simulator_config.viewer.enable_tracking else "OFF"
-            logger.info(f"Camera tracking: {status} (press 'Y' to toggle)")
-            self._update_text_overlay()  # Update UI
+            self._set_camera_tracking()
             return
 
         # Handle world_id toggling for multi-environment visualization (WarpBackend only)
@@ -1509,14 +1671,8 @@ class MuJoCo(BaseSimulator):
                     logger.warning(f"Environment {requested_id} does not exist (max: {self.num_envs - 1})")
                 return
 
-        # Use unified command registry
-        if not hasattr(self, "_command_registry"):
-            self._command_registry = CommandRegistry(self)
-            # Register callback for UI updates on command execution
-            self._command_registry.on_command_executed = self._update_text_overlay
-
         # Single call handles both gantry and robot commands
-        if self._command_registry.execute_command(keycode):
+        if self._ensure_command_registry().execute_command(keycode):
             return  # Command handled
 
         # Log unhandled keys
@@ -1528,18 +1684,23 @@ class MuJoCo(BaseSimulator):
             self.commands.fill_(0.0)
             logger.info("Zeroed all commands")
 
+    def close(self) -> None:
+        """Cleanup native and browser viewer resources."""
+        logger.info("=== MuJoCo Simulator Cleanup Started ===")
+        if self.remote_viewer is not None:
+            self.remote_viewer.close()
+            self.remote_viewer = None
+        if self.viewer is not None:
+            self.viewer = None
+            logger.info("MuJoCo viewer reference released")
+        logger.info("=== MuJoCo Simulator Cleanup Completed ===")
+
     def __del__(self) -> None:
         """Cleanup viewer on simulator destruction."""
-        logger.info("=== MuJoCo Simulator Cleanup Started ===")
-        if hasattr(self, "viewer") and self.viewer is not None:
-            try:
-                logger.info("Closing MuJoCo viewer")
-                # Official mujoco.viewer handles cleanup automatically, set to None to release reference
-                self.viewer = None
-                logger.info("MuJoCo viewer reference released")
-            except Exception as e:
-                logger.warning(f"Error during viewer cleanup: {e}")
-        logger.info("=== MuJoCo Simulator Cleanup Completed ===")
+        try:
+            self.close()
+        except Exception as e:  # pragma: no cover - destructor best effort
+            logger.warning(f"Error during MuJoCo simulator cleanup: {e}")
 
     def _update_contact_forces(self) -> None:
         """Update contact forces tensor using MuJoCo's canonical mj_contactForce() API.

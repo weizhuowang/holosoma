@@ -153,6 +153,38 @@ For testing trained policies in MuJoCo simulation or deploying to real robots, s
 
 **Note**: ONNX policies are typically exported alongside `.pt` checkpoints during training, but can also be generated using the in-training evaluation script above.
 
+### Headless Browser Viewer (MuJoCo + Viser)
+
+For MuJoCo direct simulation on a headless server, `run_sim.py` now supports a browser-based viewer backend powered by `viser`.
+
+```bash
+source scripts/source_mujoco_setup.sh
+export MUJOCO_GL=egl
+
+python src/holosoma/holosoma/run_sim.py robot:g1-29dof \
+    --training.headless=True \
+    --simulator.config.viewer.backend=viser \
+    --simulator.config.viewer.viser.host=0.0.0.0 \
+    --simulator.config.viewer.viser.port=8080
+```
+
+Open `http://<server-ip>:8080` in a browser to inspect the robot remotely.
+
+Supported browser controls include:
+- Show/hide robot meshes
+- Camera tracking toggle
+- Reset simulation
+- Gantry raise/lower/toggle
+- Gantry force sign toggle
+- Zero command vector
+
+If `viser` is missing from an older `hsmujoco` environment, reinstall the package into that env:
+
+```bash
+source scripts/source_mujoco_setup.sh
+pip install viser
+```
+
 ## Advanced Configuration
 
 The training system uses a hierarchical configuration system. The `exp` config serves as the main entry point with default configurations tuned for each algorithm and robot. You can customize training by overriding parameters on the command line.

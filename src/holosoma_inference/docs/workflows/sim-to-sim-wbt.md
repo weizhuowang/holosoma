@@ -17,6 +17,20 @@ The sim-to-sim workflow allows you to replay IsaacSim/IsaacGym-trained WBT check
 
 **Note:** Always use `--task.interface lo` (loopback) when inference and MuJoCo run on the same machine.
 
+**Headless option:** On remote servers, you can launch MuJoCo with the browser-based Viser viewer instead of the native desktop window:
+
+```bash
+source scripts/source_mujoco_setup.sh
+export MUJOCO_GL=egl
+python src/holosoma/holosoma/run_sim.py robot:g1-29dof \
+    --training.headless=True \
+    --simulator.config.viewer.backend=viser \
+    --simulator.config.viewer.viser.host=0.0.0.0 \
+    --simulator.config.viewer.viser.port=8080
+```
+
+Open `http://<server-ip>:8080` from your browser. The Viser GUI exposes reset, gantry, camera tracking, and status widgets.
+
 ---
 
 ## Unitree G1 (29-DOF)

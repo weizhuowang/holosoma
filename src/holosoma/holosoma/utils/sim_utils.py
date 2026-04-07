@@ -385,8 +385,8 @@ class DirectSimulation:
         """
         logger.debug("Initializing simulator...")
 
-        # Need to manually set headless since it's in training config currently
-        self.simulator.set_headless(False)
+        # Need to manually set headless since it's stored in training config
+        self.simulator.set_headless(self.config.training.headless)
 
         # Step 1: Basic setup
         self.simulator.setup()
@@ -418,8 +418,8 @@ class DirectSimulation:
         self.simulator.on_episode_start(env_id=0)
         logger.debug("simulator.on_episode_start() completed")
 
-        # Step 6: Setup viewer if not headless
-        if not self.config.training.headless:
+        # Step 6: Setup any configured viewer backend(s)
+        if self.simulator.should_setup_viewer():
             self.simulator.setup_viewer()
             logger.debug("simulator.setup_viewer() completed")
 
