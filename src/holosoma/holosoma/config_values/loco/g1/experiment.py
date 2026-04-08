@@ -4,6 +4,7 @@ from holosoma.config_types.experiment import ExperimentConfig, NightlyConfig, Tr
 from holosoma.config_types.observation import ObsTermCfg
 from holosoma.config_types.randomization import RandomizationTermCfg
 from holosoma.config_types.reward import RewardTermCfg
+from holosoma.config_types.curriculum import CurriculumTermCfg
 from holosoma.config_types.termination import TerminationTermCfg
 from holosoma.config_values import (
     action,
@@ -23,6 +24,7 @@ _OBS_TERMS = "holosoma.managers.observation.terms.locomotion"
 _REW_TERMS = "holosoma.managers.reward.terms.locomotion"
 _TERM_TERMS = "holosoma.managers.termination.terms.locomotion"
 _RAND_TERMS = "holosoma.managers.randomization.terms.locomotion"
+_CURR_TERMS = "holosoma.managers.curriculum.terms.locomotion"
 
 g1_29dof = ExperimentConfig(
     env_class="holosoma.envs.locomotion.locomotion_thermal_manager.LeggedRobotLocomotionThermalManager",
@@ -142,7 +144,31 @@ g1_29dof_thermal = ExperimentConfig(
         },
     ),
     command=command.g1_29dof_command,
-    curriculum=curriculum.g1_29dof_curriculum,
+    curriculum=replace(
+        curriculum.g1_29dof_curriculum,
+        setup_terms={
+            **curriculum.g1_29dof_curriculum.setup_terms,
+            "command_range_curriculum": CurriculumTermCfg(
+                func=f"{_CURR_TERMS}:CommandRangeCurriculum",
+                params={
+                    "enabled": True,
+                    "start_iteration": 2000,
+                    "end_iteration": 10000,
+                    "steps_per_iter": 24,
+                    "initial_ranges": {
+                        "lin_vel_x": [-1.0, 1.0],
+                        "lin_vel_y": [-1.0, 1.0],
+                        "ang_vel_yaw": [-1.0, 1.0],
+                    },
+                    "final_ranges": {
+                        "lin_vel_x": [-4.0, 4.0],
+                        "lin_vel_y": [-4.0, 4.0],
+                        "ang_vel_yaw": [-4.0, 4.0],
+                    },
+                },
+            ),
+        },
+    ),
     reward=replace(
         reward.g1_29dof_loco,
         terms={

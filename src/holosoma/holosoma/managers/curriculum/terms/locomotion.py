@@ -211,6 +211,68 @@ class PenaltyCurriculum(CurriculumTermBase):
             self.env.reward_manager.set_term_cfg(name, scaled_cfg)
 
 
+class CommandRangeCurriculum(CurriculumTermBase):
+    """Linearly ramp velocity command ranges over training iterations.
+
+    Gradually increases the range of sampled velocity commands from
+    initial (narrow) to final (wide) ranges between configurable
+    iteration bounds, matching FAR-FALCON's command curriculum behavior.
+    """
+
+    def __init__(self, cfg: Any, env: Any):
+        super().__init__(cfg, env)
+        params = cfg.params or {}
+        self.enabled = params.get("enabled", True)
+        self.start_iteration = int(params.get("start_iteration", 2000))
+        self.end_iteration = int(params.get("end_iteration", 10000))
+        self.steps_per_iter = int(params.get("steps_per_iter", 24))
+        self.initial_ranges: dict[str, list[float]] = params.get(
+            "initial_ranges", {"lin_vel_x": [-1.0, 1.0], "lin_vel_y": [-1.0, 1.0], "ang_vel_yaw": [-1.0, 1.0]}
+        )
+        self.final_ranges: dict[str, list[float]] = params.get(
+            "final_ranges", {"lin_vel_x": [-4.0, 4.0], "lin_vel_y": [-4.0, 4.0], "ang_vel_yaw": [-4.0, 4.0]}
+        )
+        self._last_iteration = -1
+        self.command_term = None
+
+    def setup(self) -> None:
+        if not self.enabled:
+            return
+        self.command_term = self.env.command_manager.get_state("locomotion_command")
+
+    def reset(self, env_ids) -> None:
+        pass  # ranges are global, not per-environment
+
+    def step(self) -> None:
+        if not self.enabled or self.command_term is None:
+            return
+
+        curr_iter = self.env.common_step_counter // self.steps_per_iter
+        if curr_iter == self._last_iteration:
+            return
+        self._last_iteration = curr_iter
+
+        # Compute interpolation factor
+        span = self.end_iteration - self.start_iteration
+        if span <= 0:
+            alpha = 1.0
+        else:
+            alpha = float(np.clip((curr_iter - self.start_iteration) / span, 0.0, 1.0))
+
+        # Lerp each range and write to command term
+        for key in self.initial_ranges:
+            if key not in self.final_ranges:
+                continue
+            init = self.initial_ranges[key]
+            final = self.final_ranges[key]
+            lo = init[0] + alpha * (final[0] - init[0])
+            hi = init[1] + alpha * (final[1] - init[1])
+            self.command_term.command_ranges[key] = (lo, hi)
+
+        if hasattr(self.env, "log_dict"):
+            self.env.log_dict["command_curriculum_alpha"] = torch.tensor(alpha, dtype=torch.float)
+
+
 # ================================================================================================
 # Legacy stateless functions (backward compatibility)
 # ================================================================================================
