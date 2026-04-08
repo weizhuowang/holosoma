@@ -1,174 +1,204 @@
-# Thermal Port 计划：FAR-FALCON → Holosoma
+# Thermal Port 计划：FAR-FALCON → Holosoma（v2）
 
-> **状态：✅ 实现完成** — 2026-03-10
-> 6 个文件修改，+265/-55 行。语法验证通过，待训练验证。
+> 上次更新：2026-04-07
+>
+> - **Phase 1（架构搬迁）**：✅ 完成
+> - **Phase 2（行为对齐）**：✅ 不需要（Holosoma 有意偏离 FAR-FALCON 默认值）
+> - **Phase 3（功能补全）**：⬜ 待开始
+> - **Phase 4（生态扩展）**：⬜ 待开始
 
 ## 背景
 
 FAR-FALCON (HumanoidVerse) 中的 thermal 功能需要 port 到 Holosoma 的 Manager-Based 架构。
-当前 `dev_thermal` 分支已有一个初步 port（commit `7ee380f`），功能可用但不符合 Holosoma 的架构惯例。
+`dev_thermal` 分支从 commit `7ee380f`（初步 port）经过多次迭代到 `e1e7992`（当前 HEAD），
+架构搬迁已完成，但行为与 FAR-FALCON 存在多处分歧，且部分功能尚未迁移。
 
-## 已修复的问题（原 port 的问题）
+---
 
-1. ~~obs/reward/termination 函数全写在 `envs/locomotion/locomotion_thermal_manager.py` 里~~ → 已搬到 `managers/xxx/terms/locomotion.py`
-2. ~~thermal reset 硬写在 `_reset_tasks_callback`，参数 hardcode~~ → 已改为 RandomizationManager 的 `reset_terms` 驱动
-3. ~~只 port 了 1 个观测（winding temp）~~ → 已加齐 5 个观测（winding, case, rate, headroom, initial）
-4. commit 混入了无关改动（device 字段）— 保留不动
-5. ~~reward 配置里 `params={}` 为空~~ → 已显式暴露 `start_temp`, `ramp_temp`, `overall_scale`
+## Phase 1：架构搬迁（✅ 已完成）
 
-## 设计方案
+### 完成的工作
 
-### 原则
+将 thermal term 函数从环境类搬到 `managers/xxx/terms/locomotion.py`，符合 Holosoma 的 Manager-Based 架构。
+
+| 文件 | 变更 | 状态 |
+|------|------|------|
+| `managers/observation/terms/locomotion.py` | +5 thermal 观测函数 | ✅ |
+| `managers/reward/terms/locomotion.py` | +1 温度惩罚函数 | ✅ |
+| `managers/termination/terms/locomotion.py` | +1 温度超限终止函数 | ✅ |
+| `managers/randomization/terms/locomotion.py` | +1 thermal reset term | ✅ |
+| `envs/locomotion/locomotion_thermal_manager.py` | 精简环境类，保留 simulator 初始化 + 更新 + reset + logging | ✅ |
+| `config_values/loco/g1/experiment.py` | `g1_29dof_thermal` 实验配置 | ✅ |
+| `agents/modules/augmentation_utils.py` | 已有 `mirror_obs_joint_temperature`，不用改 | ✅ |
+
+### 设计原则
 
 - term 函数放 `managers/xxx/terms/`，不放环境类文件
-- 环境类只负责 ThermalSimulator 初始化 + 每步温度更新
-- thermal reset 走 RandomizationManager 的 reset_terms
+- 环境类只负责 ThermalSimulator 初始化 + 每步温度更新 + reset 底层方法 + logging
+- thermal reset 走 RandomizationManager 的 `reset_terms`（环境类 `_reset_tasks_callback` 保留 fallback 到 ambient）
 - 所有 magic number 通过 `params` 配置传入
-- 不新建文件夹或文件（thermal terms 直接加到现有 locomotion terms 文件里）
+- 所有 thermal obs/reward/termination 用 `getattr(env, ...)` 安全访问，非 thermal 环境调用时返回默认值
 
-### 文件变更
+### 相对 FAR-FALCON 的有意改动
 
-#### 1. `managers/observation/terms/locomotion.py` — 加 5 个观测函数
+1. **Logging 公式修复**：FAR-FALCON `_update_log_dict` 用指数公式计算 `temp_penalty_*`，与 reward 实际用的线性公式不一致。Holosoma port 时统一改为线性公式 `clamp((T - 60) / 50, 0, 1.5)`。
+2. **`_reset_tasks_callback` fallback**：即使不配 `thermal_reset` randomization term，环境类也会在 reset 时把温度归零到 ambient，避免 episode 间漏 reset。
+3. **`fast_dynamics=True`**：commit `e1e7992` 启用了 `ThermalSimulator` 的快速动力学模式（FAR-FALCON 默认 `False`）。温度上升更快，训练中 thermal 信号更强。
+
+---
+
+## Phase 2：行为对齐（✅ 不需要）
+
+Holosoma 的 thermal 训练参数有意偏离 FAR-FALCON 默认值，形成一套自洽的配置：
+
+| 差异点 | FAR-FALCON | Holosoma | 结论 |
+|---|---|---|---|
+| `max_episode_length_s` | 100s | 20s（默认） | `fast_dynamics=True` 加速温度累积，20s 够 |
+| `penalty_curriculum.degree` | 0.0001 | 0.00025 | Holosoma 自己的调参，不改 |
+| `penalty_curriculum.level_up_threshold` | 850 | 750 | 同上 |
+| `terminate_by_temperature` | 关 | 开（threshold=110） | Holosoma 有意加强，正确 |
+| `overall_scale` | 0.3 | 1.5 | 配合 fast_dynamics + 短 episode，合理 |
+| `thermal_params_path` | YAML 配置 | 环境变量 | 只有一套 params，够用 |
+
+---
+
+## Phase 3：功能补全（⬜ 待开始）
+
+### 3.1 Command Curriculum
+
+**来源**：FAR-FALCON `locomotion_thermal.py:87-126`
+
+FAR-FALCON 在训练过程中将速度命令范围从 ±1.0 m/s 线性 ramp 到 ±4.0 m/s（迭代 2000-10000）。
+高速命令才能真正暴露电机过热问题——±1 m/s 下温度上不去。
+
+**Holosoma 现状**：
+- `config_values/loco/g1/command.py:21-25`：`lin_vel_x: [-1.0, 1.0]` 写死
+- `managers/command/terms/locomotion.py` 的 `LocomotionCommand` 类无 ramp 机制
+
+**实现方案**：
+在 `managers/curriculum/terms/locomotion.py` 加一个 `CommandRangeCurriculum` class（参考 `PenaltyCurriculum:105` 写法），在 `step()` 阶段修改 `command_manager.get_term("locomotion_command").command_ranges`。
 
 ```python
-def joint_temperature(env, ambient_temp=30.0, clip_max=300.0) -> Tensor:
-    """绕组温度，(num_envs, num_dof)。非 thermal 关节填 ambient_temp。"""
-
-def joint_case_temperature(env, ambient_temp=30.0, clip_max=300.0) -> Tensor:
-    """壳体温度，(num_envs, num_dof)。"""
-
-def joint_temperature_rate(env, clip_range=10.0) -> Tensor:
-    """温度变化率 (°C/s)，clamp 到 ±clip_range。"""
-
-def joint_temperature_headroom(env, max_temp=110.0, ambient_temp=30.0) -> Tensor:
-    """距最高温限制的余量。"""
-
-def joint_temperature_initial(env, ambient_temp=30.0) -> Tensor:
-    """episode 开始时的初始温度（帮助 policy 理解 thermal budget）。"""
+class CommandRangeCurriculum(CurriculumTermBase):
+    """基于迭代次数线性 ramp 速度命令范围。"""
+    # params: start_iteration, end_iteration, final_lin_vel_x_range
+    # 每步根据 common_step_counter 计算 factor，更新 command_ranges
 ```
 
-所有函数签名统一 `(env, **params)`，通过 `getattr` 安全访问 thermal 属性，
-非 thermal 环境调用时返回默认值（ambient_temp 或 zero）。
-
-#### 2. `managers/reward/terms/locomotion.py` — 加 1 个奖励函数
-
+配置：
 ```python
-def penalty_joint_temperature(env, start_temp=60.0, ramp_temp=50.0,
-                               max_penalty=1.5, max_weight=0.8,
-                               mean_weight=0.2, overall_scale=0.3) -> Tensor:
-    """温度惩罚。从 start_temp 开始线性增长，0.8*max + 0.2*mean。"""
-```
-
-从现有 `locomotion_thermal_manager.py` 底部搬过来，逻辑不变。
-
-#### 3. `managers/termination/terms/locomotion.py` — 加 1 个终止函数
-
-```python
-def temperature_exceeded(env, threshold=90.0) -> Tensor:
-    """任意关节 winding > threshold 则终止。"""
-```
-
-从现有 `locomotion_thermal_manager.py` 底部搬过来，逻辑不变。
-
-#### 4. `managers/randomization/terms/locomotion.py` — 加 thermal reset term
-
-```python
-def thermal_reset(env, randomize_temp=True, winding_temp_range=(30.0, 50.0),
-                  case_temp_range=(30.0, 50.0), hot_knee_prob=0.4,
-                  hot_hip_prob=0.4, hot_joint_temp=90.0):
-    """reset 时随机化温度初始状态。委托给 env.apply_thermal_reset()。"""
-```
-
-环境类保留 `apply_thermal_reset()` 和 `_sample_initial_thermal_temps()` 作为底层方法，
-randomization term 只是包装调用。
-
-#### 5. `envs/locomotion/locomotion_thermal_manager.py` — 精简环境类
-
-保留：
-- `__init__` + `_init_thermal_simulator()`：初始化 ThermalSimulator
-- `_pre_compute_observations_callback()`：每步更新温度
-- `_update_thermal_simulation()`：调用 thermal_simulator.step()
-- `apply_thermal_reset()` + `_sample_initial_thermal_temps()`：被 randomization term 调用
-- `_update_log_dict()`：thermal logging
-- `get_thermal_info()`：监控接口
-
-删除：
-- `_reset_tasks_callback()` 中的 hardcode reset（改由 randomization term 驱动）
-- 文件底部的 3 个独立函数（搬到 managers/terms/）
-
-#### 6. `config_values/loco/g1/experiment.py` — 更新配置
-
-更新 `g1_29dof_thermal` 的 func 路径：
-- `holosoma.envs.locomotion.locomotion_thermal_manager:obs_joint_temperature`
-  → `holosoma.managers.observation.terms.locomotion:joint_temperature`
-- `holosoma.envs.locomotion.locomotion_thermal_manager:reward_penalty_joint_temperature`
-  → `holosoma.managers.reward.terms.locomotion:penalty_joint_temperature`
-- `holosoma.envs.locomotion.locomotion_thermal_manager:termination_temperature_exceeded`
-  → `holosoma.managers.termination.terms.locomotion:temperature_exceeded`
-
-补充 reward params：
-```python
-"penalty_joint_temperature": RewardTermCfg(
-    func="holosoma.managers.reward.terms.locomotion:penalty_joint_temperature",
-    weight=-1.0,
-    params={"start_temp": 60.0, "ramp_temp": 50.0, "overall_scale": 0.3},
-    tags=["penalty_curriculum"],
+"command_curriculum": CurriculumTermCfg(
+    func="holosoma.managers.curriculum.terms.locomotion:CommandRangeCurriculum",
+    params={
+        "start_iteration": 2000,
+        "end_iteration": 10000,
+        "final_lin_vel_x_range": 4.0,
+    },
 ),
 ```
 
-加 randomization reset term：
-```python
-randomization=replace(randomization.g1_29dof_randomization, reset_terms={
-    **randomization.g1_29dof_randomization.reset_terms,
-    "thermal_reset": RandomizationTermCfg(
-        func="holosoma.managers.randomization.terms.locomotion:thermal_reset",
-        params={
-            "winding_temp_range": [30.0, 50.0],
-            "case_temp_range": [30.0, 50.0],
-            "hot_knee_prob": 0.4,
-            "hot_hip_prob": 0.4,
-            "hot_joint_temp": 90.0,
-        },
-    ),
-}),
-```
+### 3.2 启用其余 thermal observations
 
-#### 7. `agents/modules/augmentation_utils.py` — 不用动
+当前 `g1_29dof_thermal` 只接入了 `joint_temperature`（1/5）。FAR-FALCON 的 `static_squat_thermal` 已经启用了 4 个（winding, case, rate, initial）并调好了 obs_scales。
 
-`mirror_obs_joint_temperature` 已经实现，适用于所有 5 个 thermal 观测
-（都是 per-DOF scalar，只需 index remap，不需 sign flip）。
+5 个 obs 函数已全部实现，需要在配置里按需启用：
 
-### 可选：多阶段训练配置
+| 观测 | 函数 | scale | 说明 |
+|---|---|---|---|
+| `joint_temperature` | `...:joint_temperature` | 0.003 | ✅ 已启用 |
+| `joint_case_temperature` | `...:joint_case_temperature` | 0.004 | ⬜ 函数已实现 |
+| `joint_temperature_rate` | `...:joint_temperature_rate` | 0.1 | ⬜ 函数已实现 |
+| `joint_temperature_headroom` | `...:joint_temperature_headroom` | 0.01 | ⬜ 函数已实现 |
+| `joint_temperature_initial` | `...:joint_temperature_initial` | 0.004 | ⬜ 函数已实现 |
+
+obs_scales 来自 FAR-FALCON `static_squat_g1_29dof_thermal.yaml:47-51`。可以先在 critic_obs 加所有 thermal obs（给 value function 更多信息），actor_obs 保持只用 joint_temperature。
+
+注意：启用更多 obs 会增大 obs 维度，需要同步更新 `augmentation_utils.py` 的 mirror mapping。当前 `mirror_obs_joint_temperature` 只处理单个 joint_temperature obs。
+
+### 3.3 Termination 分类统计
+
+**来源**：FAR-FALCON `locomotion.py:29-39` + `locomotion_thermal.py:49-50,525-527`
+
+FAR-FALCON 维护 `termination_counts` 字典，按原因（timeout/contact/gravity/low_height/temperature 等）分别统计终止次数，训练时打印分布。帮助诊断"robot 是摔了还是过热了"。
+
+Holosoma 没有这个基础设施。
+
+**实现方案**：在 `TerminationManager` 中加一个 per-term counter，每次 reset 时统计哪个 term 触发了终止。或者在 `_update_log_dict` 中添加 per-term 终止率到 WandB。
+
+### 3.4 多阶段训练配置
+
+**来源**：FAR-FALCON `static_squat_g1_29dof_stage1.yaml` / `_stage2.yaml`
 
 ```python
 # Stage 1: 学基础行走，关闭温度惩罚和终止
 g1_29dof_thermal_stage1 = replace(g1_29dof_thermal,
     training=replace(..., name="g1_29dof_thermal_stage1"),
     reward=replace(..., "penalty_joint_temperature": RewardTermCfg(weight=0.0, ...)),
-    termination=replace(...),  # 去掉 temperature term
+    termination=replace(...),  # 去掉 temperature_exceeded term
 )
 
-# Stage 2: 打开温度惩罚和终止
+# Stage 2: 打开温度惩罚和终止，加载 stage1 checkpoint
 g1_29dof_thermal_stage2 = replace(g1_29dof_thermal,
     training=replace(..., name="g1_29dof_thermal_stage2"),
     reward=replace(..., "penalty_joint_temperature": RewardTermCfg(weight=-2.0, ...)),
 )
 ```
 
-### 不 port 的内容
+---
 
-以下 FAR-FALCON 功能暂不 port（与当前 locomotion thermal 无关或优先级低）：
-- Sound system（`sound_sim` 集成）
-- Torque monitor callback（独立功能，不影响训练）
-- Static squat 环境
-- Upper body force resistance 环境
-- Command curriculum（FAR-FALCON 写在环境类里，Holosoma 应该在 CurriculumManager 里实现）
-- T1 机器人 thermal 变体（等 G1 稳定后再加）
+## Phase 4：生态扩展（⬜ 待开始）
 
-### 无关改动处理
+以下功能不直接影响 locomotion thermal 训练，优先级较低。
 
-commit `7ee380f` 中的 `device` 字段和 `_normalize_device` 改动与 thermal 无关，
-应该拆成独立 commit 或保留在主分支。重构时不动这部分。
+### 4.1 TorqueMonitor Eval Callback
+
+**来源**：FAR-FALCON `agents/callbacks/torque_monitor.py`（162 行）
+
+实时 web UI（端口 5001），用 `toy_thermal_ig.sim2sim_monitor.MonitorServer`。显示 per-joint motor torque utilization（彩色 bar）+ thermal data + 速度命令/实际速度。包含 camera follow 模式。
+
+Holosoma 现状：
+- `agents/callbacks/base_callback.py` 有空的 `RLEvalCallback` 基类
+- 无任何具体 callback 实现
+- 启用方式需要适配 Tyro（FAR-FALCON 用 Hydra `+opt=eval_torque_monitor`）
+
+### 4.2 StaticSquat 环境
+
+**来源**：FAR-FALCON `envs/squat/static_squat.py`（继承 `LeggedRobotLocomotionThermal`）
+
+静态深蹲任务，添加 `arm_symmetry` 和 `both_feet_contact` reward。Thermal config 启用 4 个 obs，penalty 强度 -2.0。
+
+需要：新环境类 + reward terms + 实验配置。
+
+### 4.3 UpperBodyForceResistance 环境
+
+**来源**：FAR-FALCON `envs/upper_body/force_resistance.py`（继承 `LeggedRobotLocomotionThermal`）
+
+在机器人手上施加向后力（默认 5N），保持平衡和行走。有 hand_position / force_resistance / hand_height / arm_symmetry 等自定义 reward。
+
+需要：新环境类 + reward terms + body index 查找 + 实验配置。
+
+### 4.4 G1 12dof 机器人配置
+
+FAR-FALCON 有 `locomotion_g1_12dof_thermal.yaml`（obs_scale=0.008 vs 29dof 的 0.003）。
+Holosoma 当前只有 g1_29dof，没有 g1_12dof robot config。不是 thermal 专属问题。
+
+### 4.5 T1 robot thermal 变体
+
+依赖 `toy_thermal_ig` 是否有 T1 的 `thermal_params.yaml`。Holosoma 已有 `config_values/loco/t1/`，robot 本身支持。
+
+### 4.6 Sound system 集成
+
+**来源**：FAR-FALCON `locomotion_thermal.py:21-34,223-253,362-377`
+
+`sound_sim` 集成（VelocitySynthesizer / DirectionChangeSynthesizer / TorqueDeltaSynthesizer / FootStompSynthesizer），eval 时给机器人配音效。纯 demo 功能。
+
+### 4.7 Sim2Real 真机温度反馈
+
+FAR-FALCON `sim2real/foxglove_layouts/` 有温度可视化面板。bridge 中 MotorState `temperature` 字段被 TODO 了（未启用）。Holosoma `bridge/unitree/unitree_sdk2py_bridge.py` 没有温度处理。
+
+如果要用 thermal policy 部署到真机（读真机电机温度作为 obs input），需要打通这条链路。
+
+---
 
 ## 训练命令
 
@@ -196,32 +226,31 @@ python src/holosoma/holosoma/train_agent.py \
     simulator:isaacgym \
     logger:wandb \
     --training.seed 1
+
+# 多卡
+torchrun --nproc_per_node=4 --master_port=29501 src/holosoma/holosoma/train_agent.py \
+    exp:g1-29dof-thermal simulator:isaacsim logger:wandb --training.num-envs 16384
 ```
 
-**依赖**: thermal 实验需要 `toy_thermal_ig` 包：
-- 默认路径：`~/Documents/gits/toy_thermal_ig`
-- 可通过 `HOLOSOMA_THERMAL_REPO` 环境变量指定
-- thermal params 默认路径：`toy_thermal_ig/data/symmetric_batch_sysid_multifile_20250807_200807/thermal_params.yaml`
-- 可通过 `HOLOSOMA_THERMAL_PARAMS_PATH` 环境变量覆盖
+## 依赖
 
-## 验证计划
+- `toy_thermal_ig`：thermal simulator 核心包
+  - 默认路径：`~/Documents/gits/toy_thermal_ig`
+  - 覆盖：`HOLOSOMA_THERMAL_REPO` 环境变量
+  - thermal params 默认路径：`toy_thermal_ig/data/symmetric_batch_sysid_multifile_20250807_200807/thermal_params.yaml`
+  - 覆盖：`HOLOSOMA_THERMAL_PARAMS_PATH` 环境变量
+- `sound_sim`（Phase 4.6 only）：`~/Documents/gits/sound_sim`
+- `sim2sim_monitor`（Phase 4.1 only）：`toy_thermal_ig` 子模块
 
-1. ⬜ 基础验证：`exp:g1-29dof-thermal` 能正常启动训练
-2. ⬜ 观测验证：检查 obs 维度匹配（当前只在 actor_obs 和 critic_obs 中加了 `joint_temperature`）
-3. ⬜ 奖励验证：WandB 中确认 `rew_penalty_joint_temperature` 曲线正常
-4. ⬜ Reset 验证：检查 randomization term 是否正确调用 `apply_thermal_reset`
-5. ⬜ 对称性验证：`use_symmetry=True` 下检查 thermal obs mirror 正确
-6. ⬜ 非 thermal 回归：确认 `exp:g1-29dof` baseline 不受影响
-7. ⬜ Thermal logging：确认 `max_winding_temp`, `temp_penalty_*` 等指标正常上报
+## 当前参数快照（`g1_29dof_thermal`）
 
-## 变更文件清单
-
-| 文件 | 变更 | 状态 |
-|------|------|------|
-| `managers/observation/terms/locomotion.py` | +5 thermal 观测函数 | ✅ |
-| `managers/reward/terms/locomotion.py` | +1 温度惩罚函数 | ✅ |
-| `managers/termination/terms/locomotion.py` | +1 温度超限终止函数 | ✅ |
-| `managers/randomization/terms/locomotion.py` | +1 thermal reset term | ✅ |
-| `envs/locomotion/locomotion_thermal_manager.py` | 精简：删除冗余函数和 hardcode reset | ✅ |
-| `config_values/loco/g1/experiment.py` | 更新 func 路径 + 加 randomization term | ✅ |
-| `agents/modules/augmentation_utils.py` | 不用改（已有 mirror 支持） | ✅ |
+| 参数 | 当前值 | FAR-FALCON 等效值 | 备注 |
+|---|---|---|---|
+| `fast_dynamics` | `True` | `False` | Holosoma 温度上升更快 |
+| `overall_scale` | `1.5` | `0.3` | Holosoma 惩罚 5x 强 |
+| `temperature_exceeded threshold` | `110.0` | N/A（默认关闭） | Holosoma 独有 |
+| `max_episode_length_s` | `20.0`（默认） | `100.0` | ⚠️ 差距 5x |
+| `penalty_curriculum.degree` | `0.00025` | `0.0001` | Holosoma ramp 更快 |
+| `penalty_curriculum.level_up_threshold` | `750` | `850` | 小差异 |
+| `obs 启用数` | 1/5 | 1/5（locomotion）；4/5（squat） | 一致（locomotion 场景） |
+| `command_ranges.lin_vel_x` | `[-1, 1]` 固定 | `[-1, 1]` → `[-4, 4]` ramp | ⚠️ 缺 curriculum |
