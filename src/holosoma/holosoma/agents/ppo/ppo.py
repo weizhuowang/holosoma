@@ -23,7 +23,7 @@ from holosoma.agents.modules.module_utils import (
 )
 from holosoma.config_types.algo import PPOConfig
 from holosoma.envs.base_task.base_task import BaseTask
-from holosoma.utils.helpers import instantiate
+from holosoma.utils.helpers import get_class, instantiate
 from holosoma.utils.inference_helpers import (
     attach_onnx_metadata,
     export_motion_and_policy_as_onnx,
@@ -763,7 +763,9 @@ class PPO(BaseAlgo):
     def _create_eval_callbacks(self):
         if self.config.eval_callbacks is not None:
             for cb in self.config.eval_callbacks:
-                self.eval_callbacks.append(instantiate(self.config.eval_callbacks[cb], training_loop=self))
+                cb_cfg = self.config.eval_callbacks[cb]
+                target_class = get_class(cb_cfg._target_)
+                self.eval_callbacks.append(target_class(cb_cfg, self))
 
     def _pre_evaluate_policy(self, reset_env=True):
         self._eval_mode()

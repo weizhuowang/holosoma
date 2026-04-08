@@ -1,0 +1,754 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Torque Monitor - Real-time Robot Monitoring</title>
+
+    <script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.0.1/socket.io.js"></script>
+
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 20px;
+            background-color: #f5f5f5;
+        }
+
+        .container {
+            max-width: 1600px;
+            margin: 0 auto;
+        }
+
+        .header {
+            text-align: center;
+            color: #333;
+            margin-bottom: 30px;
+        }
+
+        .status {
+            padding: 10px;
+            margin: 10px 0;
+            border-radius: 4px;
+            font-weight: bold;
+            text-align: center;
+        }
+
+        .status.safe {
+            background-color: #d4edda;
+            color: #155724;
+        }
+
+        .status.warning {
+            background-color: #fff3cd;
+            color: #856404;
+        }
+
+        .status.danger {
+            background-color: #f8d7da;
+            color: #721c24;
+        }
+
+        .plot-container {
+            background: white;
+            padding: 20px;
+            margin: 20px 0;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+        }
+
+        .checkbox-container {
+            margin-bottom: 10px;
+            max-height: 120px;
+            overflow-y: auto;
+            border: 1px solid #ddd;
+            padding: 10px;
+            border-radius: 4px;
+            background-color: #f9f9f9;
+        }
+
+        .checkbox-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+            gap: 5px;
+        }
+
+        .checkbox-label {
+            display: flex;
+            align-items: center;
+            font-size: 12px;
+        }
+
+        .checkbox-label input {
+            margin-right: 5px;
+        }
+
+        .thermal-checkbox-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+            gap: 5px;
+        }
+
+        .thermal-joint-container {
+            border: 1px solid #eee;
+            padding: 5px;
+            border-radius: 3px;
+            background-color: white;
+        }
+
+        .thermal-joint-title {
+            font-weight: bold;
+            font-size: 11px;
+            margin-bottom: 3px;
+        }
+
+        .thermal-checkbox-label {
+            display: flex;
+            align-items: center;
+            font-size: 10px;
+            margin-bottom: 2px;
+        }
+
+        .thermal-checkbox-label input {
+            margin-right: 3px;
+        }
+
+        .loading {
+            text-align: center;
+            font-size: 18px;
+            color: #666;
+            margin-top: 50px;
+        }
+    </style>
+</head>
+
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🔧 Motor Torque Monitor</h1>
+            <p>Real-time motor torque and thermal visualization</p>
+        </div>
+
+        <div id="status" class="status safe">System Status: Initializing...</div>
+
+        <!-- Real-time Torque -->
+        <div class="plot-container">
+            <h3>Real-time Torque Utilization</h3>
+            <div id="torque-bars" style="height: 600px;">
+                <p class="loading">Loading torque data...</p>
+            </div>
+        </div>
+
+        <!-- Torque Timeline -->
+        <div class="plot-container">
+            <h3>Torque History (5s window)</h3>
+            <div class="checkbox-container">
+                <p style="margin: 0 0 10px 0; font-weight: bold;">Select joints to display:</p>
+                <div id="torque-checkboxes" class="checkbox-grid"></div>
+            </div>
+            <div id="torque-timeline" style="height: 400px;">
+                <p class="loading">Loading timeline...</p>
+            </div>
+        </div>
+
+        <!-- Peak Usage -->
+        <div class="plot-container">
+            <h3>Peak Torque Usage (Recent History)</h3>
+            <div id="peak-usage" style="height: 300px;">
+                <p class="loading">Loading peak data...</p>
+            </div>
+        </div>
+
+        <!-- Thermal Section -->
+        <div id="thermal-section" style="display: none;">
+            <div class="plot-container">
+                <h3>Joint Temperatures</h3>
+                <div id="thermal-bars" style="height: 500px;">
+                    <p class="loading">Loading thermal data...</p>
+                </div>
+            </div>
+
+            <div class="plot-container">
+                <h3>Temperature History (50s window)</h3>
+                <div class="checkbox-container">
+                    <p style="margin: 0 0 10px 0; font-weight: bold;">Select thermal data to display:</p>
+                    <div id="thermal-checkboxes" class="thermal-checkbox-grid"></div>
+                </div>
+                <div id="thermal-timeline" style="height: 400px;">
+                    <p class="loading">Loading thermal timeline...</p>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Application state
+        const app = {
+            socket: null,
+            data: {
+                metadata: null,
+                current: {},
+                torqueTimeline: { time: [], data: [] },
+                thermalTimeline: { time: [], joints: {} }
+            },
+            ui: {
+                checkboxesCreated: { torque: false, thermal: false }
+            },
+            // Moving average buffer for actual velocity (20 samples)
+            actualVelBuffer: []
+        };
+
+        // Initialize socket connection
+        function init() {
+            app.socket = io.connect(`http://${document.domain}:${location.port}`);
+
+            app.socket.on('torque_update', (data) => {
+                const message = JSON.parse(data);
+
+                if (message.message_type === 'full_update') {
+                    handleFullUpdate(message);
+                } else if (message.message_type === 'incremental_update') {
+                    handleIncrementalUpdate(message);
+                }
+            });
+        }
+
+        // Handle full data update
+        function handleFullUpdate(message) {
+            app.data.metadata = message.metadata;
+            app.data.current = message.current;
+
+            // Reset timelines
+            if (message.timeline.torque) {
+                app.data.torqueTimeline = message.timeline.torque;
+            }
+
+            if (message.timeline.thermal) {
+                app.data.thermalTimeline = message.timeline.thermal;
+            }
+
+            // Create UI elements
+            if (!app.ui.checkboxesCreated.torque) {
+                createCheckboxes('torque-checkboxes', app.data.metadata.joint_names, updateTorqueTimeline);
+                app.ui.checkboxesCreated.torque = true;
+            }
+
+            if (message.current.thermal && !app.ui.checkboxesCreated.thermal) {
+                createThermalCheckboxes(message.current.thermal.joints);
+                app.ui.checkboxesCreated.thermal = true;
+            }
+
+            updateAllPlots();
+            hideLoadingMessages();
+        }
+
+        // Handle incremental update
+        function handleIncrementalUpdate(message) {
+            app.data.current = message.current;
+
+            // Append new timeline data
+            if (message.new_data) {
+                if (message.new_data.torque) {
+                    app.data.torqueTimeline.time.push(...message.new_data.torque.time);
+                    app.data.torqueTimeline.data.push(...message.new_data.torque.data);
+
+                    // Trim to window size (250 points = 5 seconds)
+                    while (app.data.torqueTimeline.time.length > 250) {
+                        app.data.torqueTimeline.time.shift();
+                        app.data.torqueTimeline.data.shift();
+                    }
+                }
+
+                if (message.new_data.thermal) {
+                    app.data.thermalTimeline.time.push(...message.new_data.thermal.time);
+
+                    for (const [joint, data] of Object.entries(message.new_data.thermal.joints)) {
+                        if (!app.data.thermalTimeline.joints[joint]) {
+                            app.data.thermalTimeline.joints[joint] = { winding: [], case: [] };
+                        }
+                        app.data.thermalTimeline.joints[joint].winding.push(...data.winding);
+                        app.data.thermalTimeline.joints[joint].case.push(...data.case);
+
+                        // Trim to window size
+                        while (app.data.thermalTimeline.joints[joint].winding.length > 250) {
+                            app.data.thermalTimeline.joints[joint].winding.shift();
+                            app.data.thermalTimeline.joints[joint].case.shift();
+                        }
+                    }
+
+                    while (app.data.thermalTimeline.time.length > 250) {
+                        app.data.thermalTimeline.time.shift();
+                    }
+                }
+            }
+
+            updateAllPlots();
+        }
+
+        // Update all plots
+        function updateAllPlots() {
+            updateTorqueBars();
+            updateTorqueTimeline();
+            updatePeakUsage();
+            updateSystemStatus();
+
+            if (app.data.current.thermal) {
+                document.getElementById('thermal-section').style.display = 'block';
+                updateThermalBars();
+                updateThermalTimeline();
+            }
+        }
+
+        // Update torque bars
+        function updateTorqueBars() {
+            const { utilization, torques } = app.data.current;
+            const jointNames = app.data.metadata.joint_names;
+
+            const colors = utilization.map(u =>
+                u > 90 ? '#dc3545' : u > 70 ? '#ffc107' : u > 50 ? '#17a2b8' : '#28a745'
+            );
+
+            const data = [{
+                x: jointNames,
+                y: utilization,
+                type: 'bar',
+                marker: { color: colors },
+                text: utilization.map((u, i) => `${u.toFixed(1)}%<br>${torques[i].toFixed(2)}Nm`),
+                textposition: 'auto'
+            }];
+
+            const layout = {
+                title: 'Current Torque Utilization by Joint',
+                xaxis: { title: 'Joint', tickangle: -45 },
+                yaxis: { title: 'Utilization (%)', range: [0, 100] },
+                margin: { b: 120 },
+                shapes: createThresholdLines(jointNames.length)
+            };
+
+            Plotly.react('torque-bars', data, layout, { responsive: true });
+        }
+
+        // Update torque timeline
+        function updateTorqueTimeline() {
+            const { time, data } = app.data.torqueTimeline;
+            if (time.length === 0) return;
+
+            const traces = [];
+
+            // Calculate statistics
+            const maxUtils = data.map(row => Math.max(...row));
+            const avgUtils = data.map(row => row.reduce((a, b) => a + b, 0) / row.length);
+
+            traces.push(
+                {
+                    x: time,
+                    y: maxUtils,
+                    type: 'scatter',
+                    mode: 'lines',
+                    name: 'Peak Usage',
+                    line: { color: '#dc3545', width: 3, dash: 'dash' }
+                },
+                {
+                    x: time,
+                    y: avgUtils,
+                    type: 'scatter',
+                    mode: 'lines',
+                    name: 'Average Usage',
+                    line: { color: '#007bff', width: 3, dash: 'dash' }
+                }
+            );
+
+            // Add selected joints
+            document.querySelectorAll('#torque-checkboxes input:checked').forEach(checkbox => {
+                const idx = parseInt(checkbox.dataset.index);
+                traces.push({
+                    x: time,
+                    y: data.map(row => row[idx]),
+                    type: 'scatter',
+                    mode: 'lines',
+                    name: checkbox.value
+                });
+            });
+
+            const timeWindow = time.length > 0 ? (time[time.length - 1] - time[0]).toFixed(1) : 0;
+
+            const layout = {
+                title: `Torque Usage Over Time (showing last ${timeWindow}s)`,
+                xaxis: { title: 'Time (s)' },
+                yaxis: { title: 'Utilization (%)', range: [0, 100] },
+                shapes: createTimelineThresholds(time)
+            };
+
+            Plotly.react('torque-timeline', traces, layout, { responsive: true });
+        }
+
+        // Update peak usage
+        function updatePeakUsage() {
+            const peak = app.data.current.peak || [];
+            const jointNames = app.data.metadata.joint_names;
+
+            const colors = peak.map(p => p > 90 ? '#dc3545' : p > 70 ? '#ffc107' : '#28a745');
+
+            const data = [{
+                x: jointNames,
+                y: peak,
+                type: 'bar',
+                marker: { color: colors },
+                text: peak.map(p => `${p.toFixed(1)}%`),
+                textposition: 'auto'
+            }];
+
+            const layout = {
+                title: 'Peak Torque Usage by Joint (Recent History)',
+                xaxis: { title: 'Joint', tickangle: -45 },
+                yaxis: { title: 'Peak Utilization (%)', range: [0, 100] },
+                margin: { b: 120 }
+            };
+
+            Plotly.react('peak-usage', data, layout, { responsive: true });
+        }
+
+        // Update thermal bars
+        function updateThermalBars() {
+            const { joints, winding, case: caseTemps } = app.data.current.thermal;
+
+            const data = [
+                {
+                    x: joints,
+                    y: winding,
+                    type: 'bar',
+                    name: 'Winding Temperature',
+                    marker: { color: winding.map(t => t > 80 ? '#dc3545' : t > 60 ? '#ffc107' : '#17a2b8') },
+                    text: winding.map(t => `${t.toFixed(1)}°C`),
+                    textposition: 'auto'
+                },
+                {
+                    x: joints,
+                    y: caseTemps,
+                    type: 'bar',
+                    name: 'Case Temperature',
+                    marker: { color: caseTemps.map(t => t > 70 ? '#dc3545' : t > 50 ? '#ffc107' : '#28a745') },
+                    text: caseTemps.map(t => `${t.toFixed(1)}°C`),
+                    textposition: 'auto'
+                }
+            ];
+
+            const layout = {
+                title: 'Current Joint Temperatures',
+                xaxis: { title: 'Joint', tickangle: -45 },
+                yaxis: { title: 'Temperature (°C)' },
+                margin: { b: 120 },
+                barmode: 'group',
+                legend: {
+                    x: 0.8,
+                    y: 1.0,
+                    xanchor: 'left',
+                    yanchor: 'top',
+                    bgcolor: 'rgba(255, 255, 255, 0.8)',
+                    bordercolor: 'rgba(0, 0, 0, 0.2)',
+                    borderwidth: 1
+                }
+            };
+
+            Plotly.react('thermal-bars', data, layout, { responsive: true });
+        }
+
+        // Update thermal timeline
+        function updateThermalTimeline() {
+            const { time, joints } = app.data.thermalTimeline;
+            if (time.length === 0) return;
+
+            const traces = [];
+
+            // Calculate statistics for all joints
+            const jointNames = Object.keys(joints);
+            if (jointNames.length > 0) {
+                const windingStats = { avg: [], max: [] };
+                const caseStats = { avg: [], max: [] };
+
+                for (let i = 0; i < time.length; i++) {
+                    const windingTemps = jointNames.map(j => joints[j].winding[i] || 0).filter(t => t > 0);
+                    const caseTemps = jointNames.map(j => joints[j].case[i] || 0).filter(t => t > 0);
+
+                    if (windingTemps.length > 0) {
+                        windingStats.avg.push(windingTemps.reduce((a, b) => a + b, 0) / windingTemps.length);
+                        windingStats.max.push(Math.max(...windingTemps));
+                    }
+
+                    if (caseTemps.length > 0) {
+                        caseStats.avg.push(caseTemps.reduce((a, b) => a + b, 0) / caseTemps.length);
+                        caseStats.max.push(Math.max(...caseTemps));
+                    }
+                }
+
+                // Add aggregate traces
+                traces.push(
+                    {
+                        x: time.slice(0, windingStats.avg.length),
+                        y: windingStats.avg,
+                        type: 'scatter',
+                        mode: 'lines',
+                        name: 'Avg Winding Temp',
+                        line: { color: '#ffc107', width: 3, dash: 'dash' }
+                    },
+                    {
+                        x: time.slice(0, windingStats.max.length),
+                        y: windingStats.max,
+                        type: 'scatter',
+                        mode: 'lines',
+                        name: 'Max Winding Temp',
+                        line: { color: '#dc3545', width: 3, dash: 'dash' }
+                    },
+                    {
+                        x: time.slice(0, caseStats.avg.length),
+                        y: caseStats.avg,
+                        type: 'scatter',
+                        mode: 'lines',
+                        name: 'Avg Case Temp',
+                        line: { color: '#17a2b8', width: 3, dash: 'dash' }
+                    },
+                    {
+                        x: time.slice(0, caseStats.max.length),
+                        y: caseStats.max,
+                        type: 'scatter',
+                        mode: 'lines',
+                        name: 'Max Case Temp',
+                        line: { color: '#28a745', width: 3, dash: 'dash' }
+                    }
+                );
+            }
+
+            // Add selected individual joint traces
+            document.querySelectorAll('#thermal-checkboxes input:checked').forEach(checkbox => {
+                const [joint, type] = checkbox.value.split('|');
+                if (joints[joint] && joints[joint][type]) {
+                    traces.push({
+                        x: time,
+                        y: joints[joint][type],
+                        type: 'scatter',
+                        mode: 'lines',
+                        name: `${joint} ${type}`,
+                        line: { color: type === 'winding' ? '#e74c3c' : '#3498db', width: 2 }
+                    });
+                }
+            });
+
+            const timeWindow = time.length > 0 ? (time[time.length - 1] - time[0]).toFixed(1) : 0;
+
+            const layout = {
+                title: `Temperature Over Time (showing last ${timeWindow}s)`,
+                xaxis: { title: 'Time (s)' },
+                yaxis: { title: 'Temperature (°C)' },
+                shapes: createThermalThresholds(time)
+            };
+
+            Plotly.react('thermal-timeline', traces, layout, { responsive: true });
+        }
+
+        // Update system status
+        function updateSystemStatus() {
+            const statusDiv = document.getElementById('status');
+            const maxUtil = Math.max(...app.data.current.utilization);
+
+            let statusText = '';
+            let statusClass = 'safe';
+            let velocityText = '';
+
+            // Add velocity information if available
+            if (app.data.current.velocity) {
+                const cmdX = app.data.current.velocity.command_x;
+                const cmdY = app.data.current.velocity.command_y;
+                
+                // Add current actual velocity to buffer
+                app.actualVelBuffer.push({
+                    x: app.data.current.velocity.actual_x,
+                    y: app.data.current.velocity.actual_y
+                });
+                
+                // Keep only last 20 samples
+                if (app.actualVelBuffer.length > 20) {
+                    app.actualVelBuffer.shift();
+                }
+                
+                // Calculate moving average
+                let avgActX = 0, avgActY = 0;
+                if (app.actualVelBuffer.length > 0) {
+                    for (let vel of app.actualVelBuffer) {
+                        avgActX += vel.x;
+                        avgActY += vel.y;
+                    }
+                    avgActX /= app.actualVelBuffer.length;
+                    avgActY /= app.actualVelBuffer.length;
+                }
+                
+                velocityText = ` | Velocity - Cmd: (${cmdX.toFixed(2)}, ${cmdY.toFixed(2)}) m/s, Act: (${avgActX.toFixed(2)}, ${avgActY.toFixed(2)}) m/s`;
+            }
+
+            if (app.data.current.thermal) {
+                const maxTemp = Math.max(
+                    ...app.data.current.thermal.winding,
+                    ...app.data.current.thermal.case
+                );
+
+                if (maxTemp > 80 || maxUtil > 90) {
+                    statusClass = 'danger';
+                    statusText = `CRITICAL: ${maxUtil.toFixed(1)}% torque, ${maxTemp.toFixed(1)}°C max temp`;
+                } else if (maxTemp > 60 || maxUtil > 70) {
+                    statusClass = 'warning';
+                    statusText = `Warning: ${maxUtil.toFixed(1)}% torque, ${maxTemp.toFixed(1)}°C max temp`;
+                } else {
+                    statusText = `Normal: ${maxUtil.toFixed(1)}% torque, ${maxTemp.toFixed(1)}°C max temp`;
+                }
+            } else {
+                if (maxUtil > 90) {
+                    statusClass = 'danger';
+                    statusText = `HIGH TORQUE WARNING: ${maxUtil.toFixed(1)}% utilization`;
+                } else if (maxUtil > 70) {
+                    statusClass = 'warning';
+                    statusText = `Moderate Usage: ${maxUtil.toFixed(1)}% max utilization`;
+                } else {
+                    statusText = `Normal Operation: ${maxUtil.toFixed(1)}% max utilization`;
+                }
+            }
+
+            statusDiv.className = `status ${statusClass}`;
+            statusDiv.textContent = statusText + velocityText;
+        }
+
+        // Utility functions
+        function createCheckboxes(containerId, items, onChange) {
+            const container = document.getElementById(containerId);
+            items.forEach((item, index) => {
+                const label = document.createElement('label');
+                label.className = 'checkbox-label';
+
+                const checkbox = document.createElement('input');
+                checkbox.type = 'checkbox';
+                checkbox.value = item;
+                checkbox.dataset.index = index;
+                checkbox.addEventListener('change', onChange);
+
+                label.appendChild(checkbox);
+                label.appendChild(document.createTextNode(item));
+                container.appendChild(label);
+            });
+        }
+
+        function createThermalCheckboxes(joints) {
+            const container = document.getElementById('thermal-checkboxes');
+
+            joints.forEach(joint => {
+                // Create container for each joint
+                const jointContainer = document.createElement('div');
+                jointContainer.className = 'thermal-joint-container';
+
+                // Add joint title
+                const title = document.createElement('div');
+                title.className = 'thermal-joint-title';
+                title.textContent = joint;
+                jointContainer.appendChild(title);
+
+                // Add winding checkbox
+                const windingLabel = document.createElement('label');
+                windingLabel.className = 'thermal-checkbox-label';
+
+                const windingCheckbox = document.createElement('input');
+                windingCheckbox.type = 'checkbox';
+                windingCheckbox.value = `${joint}|winding`;
+                windingCheckbox.addEventListener('change', updateThermalTimeline);
+
+                windingLabel.appendChild(windingCheckbox);
+                windingLabel.appendChild(document.createTextNode('Winding'));
+                jointContainer.appendChild(windingLabel);
+
+                // Add case checkbox
+                const caseLabel = document.createElement('label');
+                caseLabel.className = 'thermal-checkbox-label';
+
+                const caseCheckbox = document.createElement('input');
+                caseCheckbox.type = 'checkbox';
+                caseCheckbox.value = `${joint}|case`;
+                caseCheckbox.addEventListener('change', updateThermalTimeline);
+
+                caseLabel.appendChild(caseCheckbox);
+                caseLabel.appendChild(document.createTextNode('Case'));
+                jointContainer.appendChild(caseLabel);
+
+                container.appendChild(jointContainer);
+            });
+
+            app.ui.checkboxesCreated.thermal = true;
+        }
+
+        function createThresholdLines(numJoints) {
+            return [
+                {
+                    type: 'line',
+                    x0: -0.5, x1: numJoints - 0.5,
+                    y0: 70, y1: 70,
+                    line: { color: '#ffc107', width: 2, dash: 'dash' }
+                },
+                {
+                    type: 'line',
+                    x0: -0.5, x1: numJoints - 0.5,
+                    y0: 90, y1: 90,
+                    line: { color: '#dc3545', width: 2, dash: 'dash' }
+                }
+            ];
+        }
+
+        function createTimelineThresholds(timeAxis) {
+            if (!timeAxis || timeAxis.length === 0) return [];
+            return [
+                {
+                    type: 'line',
+                    x0: timeAxis[0], x1: timeAxis[timeAxis.length - 1],
+                    y0: 70, y1: 70,
+                    line: { color: '#ffc107', width: 1, dash: 'dash' }
+                },
+                {
+                    type: 'line',
+                    x0: timeAxis[0], x1: timeAxis[timeAxis.length - 1],
+                    y0: 90, y1: 90,
+                    line: { color: '#dc3545', width: 1, dash: 'dash' }
+                }
+            ];
+        }
+
+        function createThermalThresholds(timeAxis) {
+            if (!timeAxis || timeAxis.length === 0) return [];
+            return [
+                {
+                    type: 'line',
+                    x0: timeAxis[0], x1: timeAxis[timeAxis.length - 1],
+                    y0: 60, y1: 60,
+                    line: { color: '#ffc107', width: 1, dash: 'dash' }
+                },
+                {
+                    type: 'line',
+                    x0: timeAxis[0], x1: timeAxis[timeAxis.length - 1],
+                    y0: 80, y1: 80,
+                    line: { color: '#dc3545', width: 1, dash: 'dash' }
+                }
+            ];
+        }
+
+        function hideLoadingMessages() {
+            document.querySelectorAll('.loading').forEach(el => el.style.display = 'none');
+        }
+
+        // Handle window resize
+        window.addEventListener('resize', () => {
+            ['torque-bars', 'torque-timeline', 'peak-usage', 'thermal-bars', 'thermal-timeline'].forEach(id => {
+                const el = document.getElementById(id);
+                if (el && el.data) Plotly.Plots.resize(el);
+            });
+        });
+
+        // Start the application
+        document.addEventListener('DOMContentLoaded', init);
+    </script>
+</body>
+
+</html>

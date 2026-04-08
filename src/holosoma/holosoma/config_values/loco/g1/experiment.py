@@ -4,6 +4,7 @@ from holosoma.config_types.experiment import ExperimentConfig, NightlyConfig, Tr
 from holosoma.config_types.observation import ObsTermCfg
 from holosoma.config_types.randomization import RandomizationTermCfg
 from holosoma.config_types.reward import RewardTermCfg
+from holosoma.config_types.algo import TorqueMonitorCfg
 from holosoma.config_types.curriculum import CurriculumTermCfg
 from holosoma.config_types.termination import TerminationTermCfg
 from holosoma.config_values import (
@@ -187,4 +188,15 @@ g1_29dof_thermal = ExperimentConfig(
     ),
 )
 
-__all__ = ["g1_29dof", "g1_29dof_fast_sac", "g1_29dof_thermal"]
+g1_29dof_thermal_eval = replace(
+    g1_29dof_thermal,
+    algo=replace(
+        g1_29dof_thermal.algo,
+        config=replace(
+            g1_29dof_thermal.algo.config,
+            eval_callbacks={"torque_monitor": TorqueMonitorCfg()},
+        ),
+    ),
+)
+
+__all__ = ["g1_29dof", "g1_29dof_fast_sac", "g1_29dof_thermal", "g1_29dof_thermal_eval"]

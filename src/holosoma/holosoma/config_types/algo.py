@@ -190,6 +190,18 @@ class PPOConfig:
 
 
 @dataclass(frozen=True)
+class TorqueMonitorCfg:
+    """Configuration for the TorqueMonitor eval callback."""
+
+    _target_: str = "holosoma.agents.callbacks.torque_monitor.TorqueMonitor"
+    sim_dt: float = 0.02
+    log_single_robot: bool = True
+    plot_update_interval: int = 2
+    use_weblogger: bool = True
+    port: int = 5001
+
+
+@dataclass(frozen=True)
 class FastSACConfig:
     num_learning_iterations: int = 25000
     """total timesteps of the experiments"""
