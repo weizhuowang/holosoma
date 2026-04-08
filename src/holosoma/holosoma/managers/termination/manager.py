@@ -40,6 +40,7 @@ class TerminationManager:
         self._term_instances: dict[str, TerminationTermBase] = {}
         self._term_names: list[str] = []
         self._term_cfgs: list[TerminationTermCfg] = []
+        self._last_term_results: dict[str, torch.Tensor] = {}
 
         self._initialize_terms()
 
@@ -91,12 +92,19 @@ class TerminationManager:
                     f"Termination term '{term_name}' returned dtype {result.dtype}, expected torch.bool tensor."
                 )
 
+            self._last_term_results[term_name] = result
+
             if term_cfg.is_timeout:
                 timeout_flags |= result
             else:
                 reset_flags |= result
 
         return reset_flags, timeout_flags
+
+    @property
+    def last_term_results(self) -> dict[str, torch.Tensor]:
+        """Per-term boolean results from the most recent :meth:`check` call."""
+        return self._last_term_results
 
     def reset(self, env_ids: torch.Tensor | None = None) -> None:
         """Reset stateful terms.

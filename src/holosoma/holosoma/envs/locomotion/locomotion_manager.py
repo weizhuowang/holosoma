@@ -180,6 +180,10 @@ class LeggedRobotLocomotionManager(BaseTask):
         avg = self._get_average_episode_tracker().get_average()
         self.log_dict["average_episode_length"] = avg.detach().cpu()
 
+        if self.termination_manager is not None:
+            for name, result in self.termination_manager.last_term_results.items():
+                self.log_dict[f"term_{name}"] = result.sum().float()
+
     ################ Curriculum #################
 
     def _get_average_episode_tracker(self):
