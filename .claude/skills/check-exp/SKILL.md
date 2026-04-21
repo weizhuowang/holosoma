@@ -5,37 +5,42 @@ description: Check status of running experiments — GPU utilization, rem jobs, 
 
 # Experiment Status Check
 
-Check the current state of all running and recent experiments. Run all three checks in parallel.
+Check the current state of all running and recent experiments.
 
-## 1. GPU Status
-
-```bash
-curl -s http://127.0.0.1:8989/api/gpus | python3 -c "
-import json, sys
-data = json.load(sys.stdin)
-for g in data['gpus']:
-    p = g.get('processes', [])
-    s = 'BUSY' if p else 'FREE'
-    print(f'GPU {g[\"index\"]}: {s} | Util {g[\"utilization_gpu_pct\"]}% | Mem {g[\"memory_used_mb\"]}/{g[\"memory_total_mb\"]}MB | Temp {g[\"temperature_c\"]}C | Power {g[\"power_w\"]}W')
-    for proc in p:
-        print(f'  PID {proc[\"pid\"]}: {proc[\"used_memory_mb\"]}MB')
-"
-```
-
-## 2. REM Job Status
+## 1. REM Status (GPU + Jobs in one call)
 
 ```bash
-python3 ~/Documents/gits/remote_exp_manager/remexp_cli.py list
+python3 ~/Documents/gits/remote_exp_manager/remexp_cli.py status
 ```
 
-For any **running** jobs, also fetch the last 20 lines of their log:
+This single command shows:
+- Summary: running / queued / recent_finished / total
+- Available GPUs (no compute processes)
+- Per-GPU: util / mem / process count
+- Running jobs: id, GPU, elapsed, name
+- Queued jobs: id, prepare_state, wait status, name
+- Recently finished jobs: id, status, return code, elapsed, name
+
+For machine-readable output (useful if you need to parse):
+```bash
+python3 ~/Documents/gits/remote_exp_manager/remexp_cli.py status --json
+```
+
+To show more history:
+```bash
+python3 ~/Documents/gits/remote_exp_manager/remexp_cli.py status --recent-minutes 240 --recent-limit 10
+```
+
+## 2. Running Job Logs
+
+For any **running** jobs shown in step 1, fetch the last 20 lines of log:
 ```bash
 python3 ~/Documents/gits/remote_exp_manager/remexp_cli.py log {job_id} --tail 20
 ```
 
 ## 3. WandB Metrics (for running experiments)
 
-Query the latest metrics from WandB for any active runs. Check both thermal projects:
+Query the latest metrics from WandB for any active runs:
 
 ```bash
 ~/.holosoma_deps/miniconda3/envs/hssim/bin/python -c "
@@ -60,16 +65,10 @@ for project in ['g1-manager-thermal', 'g1-manager-thermal-baseline']:
 
 ## 4. Present Summary
 
-Combine all three into a concise status table:
-
-| GPU | Util | Mem | Job | Status | Step | Reward | Ep Len |
-|-----|------|-----|-----|--------|------|--------|--------|
-| ... | ...  | ... | ... | ...    | ...  | ...    | ...    |
-
-Flag any issues:
-- GPU at >95% memory utilization
+Combine REM status + WandB metrics into a concise overview. Flag any issues:
 - Jobs in `failed` state
-- Reward plateauing or dropping (if enough history visible)
+- GPU at >95% memory utilization
+- Reward plateauing or dropping
 - Abnormally high temperatures (GPU or winding)
 
 ## Tip
@@ -78,4 +77,3 @@ For continuous monitoring, combine with the loop skill:
 ```
 /loop 10m /check-exp
 ```
-This will auto-check every 10 minutes.

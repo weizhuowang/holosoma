@@ -84,3 +84,27 @@ api = wandb.Api()
 - Snapshot 目录：`~/Documents/gits/remote_exp_manager/data/snapshots/{job_id}/src/`
 - 训练 log 在 snapshot 目录里，不在原 repo：`snapshots/{job_id}/src/logs/`
 - 同时跑多个 torchrun 需要不同的 `--master_port` 和 `CUDA_VISIBLE_DEVICES`
+- 状态查询：`python3 ~/Documents/gits/remote_exp_manager/remexp_cli.py status --json`
+- 排队功能：`--wait-for-job <job_id>` 让新 job 等指定 job 完成后再启动（snapshot 会立即创建）
+- 只支持 1 卡或 2 卡实验，8 卡机器用并行跑更多实验而非单实验多卡
+
+## 实验工作流
+
+可用的 skill 和 agent：
+- `/launch-exp` — Skill：查 GPU、规划分配、确认后批量起实验（spawn run-exp agents）
+- `/run-exp` — Agent：提交单个实验到 rem + 监控到完成，返回原始状态（不分析）
+- `/check-exp` — Skill：快速查当前状态（GPU + 跑着的 job + WandB 最新指标）
+- `/report-exp` — Agent：实验跑完后生成详细报告（读 TensorBoard、画图、统计摘要）
+
+标准流程：
+1. `/launch-exp` 起实验 → 自动 spawn 后台 run-exp agent
+2. 跑的过程中用 `/check-exp` 查进度（或 `/loop 10m /check-exp` 自动巡检）
+3. run-exp agent 完成后通知你 → 更新 experiments_log.md
+4. 需要深度分析时 spawn `/report-exp`（读图理解训练曲线）
+
+## 实验记录
+
+**每次启动或完成实验时，必须更新 `.claude/experiments_log.md`。**
+- 启动时追加 `[LAUNCHED]` 条目（config、GPU、seed、目标）
+- 完成时追加 `[DONE]` 条目（status、reward、takeaway）
+- 即使不走 `/launch-exp` skill，手动跑实验也要记录
